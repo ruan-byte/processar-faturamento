@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 import json
 import re
 
-app = FastAPI(title="Processar Faturamento API", version="2.0")
+app = FastAPI(title="Processar Faturamento API", version="3.0")
 
 # CORS para permitir chamadas do Make.com
 app.add_middleware(
@@ -20,7 +20,8 @@ async def root():
     return {
         "status": "online",
         "service": "processar-faturamento",
-        "version": "2.0",
+        "version": "3.0",
+        "note": "Retorna array direto, sem wrapper 'data'",
         "expected_columns": [
             "Cod. Cli./For.",
             "Cliente/Fornecedor",
@@ -32,179 +33,194 @@ async def root():
             "Marca",
             "Cidade",
             "Estado"
-        ],
-        "endpoints": {
-            "POST /processar-faturamento": "Processa HTML de email de faturamento"
-        }
+        ]
     }
 
-def normalizar_valor_brasileiro(valor_str: str) -> str:
+def converter_valor_brasileiro(valor_str: str) -> str:
     """
-    Converte valores brasileiros para formato numérico:
-      '4.189,00' -> '4189.00'
-      '480,00'   -> '480.00'
-      '1.108,95' -> '1108.95'
+    Converte valores do formato brasileiro para formato numérico.
+    Exemplos:
+    - "18.629,20" -> "18629.20"
+    - "9.455,00" -> "9455.00"
+    - "373,50" -> "373.50"
+    - "1.620,00" -> "1620.00"
     """
     try:
-        bruto = (valor_str or "").strip()
-        # Remove caracteres inválidos (mantém apenas dígitos, ponto, vírgula e hífen)
-        bruto = re.sub(r"[^\d.,-]", "", bruto)
-
-        if bruto == "":
-            return "0.00"
-
-        # Remove pontos de milhar e substitui vírgula decimal por ponto
-        sem_milhar = bruto.replace(".", "")
-        decimal_ponto = sem_milhar.replace(",", ".")
-
-        # Valida e formata
-        valor_float = float(decimal_ponto)
-        return f"{abs(valor_float):.2f}"
+        # Remove espaços
+        valor_limpo = valor_str.strip()
+        
+        # Remove qualquer caractere que não seja número, ponto ou vírgula
+        valor_limpo = re.sub(r'[^\d,.]', '', valor_limpo)
+        
+        if not valor_limpo:
+            return "0"
+        
+        # Se tem vírgula, é formato brasileiro
+        if ',' in valor_limpo:
+            # Remove pontos (separador de milhar)
+            valor_sem_pontos = valor_limpo.replace('.', '')
+            # Troca vírgula por ponto (decimal)
+            valor_final = valor_sem_pontos.replace(',', '.')
+        else:
+            # Não tem vírgula, só ponto
+            partes = valor_limpo.split('.')
+            
+            if len(partes) == 2 and len(partes[1]) == 2:
+                # Provavelmente decimal: "373.50"
+                valor_final = valor_limpo
+            else:
+                # Provavelmente milhar: "1.234" -> "1234"
+                valor_final = valor_limpo.replace('.', '')
+        
+        # Valida se é um número válido
+        float(valor_final)
+        
+        return valor_final
+        
     except Exception as e:
         print(f"❌ Erro ao converter valor '{valor_str}': {e}")
-        return "0.00"
+        return "0"
 
 
 @app.post("/processar-faturamento")
 async def processar_faturamento(request: Request):
     """
-    Recebe HTML de email com tabela de faturamento e retorna JSON estruturado.
+    IMPORTANTE: Retorna array DIRETO (sem wrapper "data")
+    Para ser compatível com Iterator do Make.com
     
     Input:
     {
       "html_email": "<table>...</table>"
     }
     
-    Output:
-    {
-      "data": [
-        {
-          "Cod. Cli./For.": "2803",
-          "Cliente/Fornecedor": "AURORA ABATE DE AVES",
-          "Data": "01/10/2025",
-          "Total Item": "480.00",
-          "Vendedor": "259 - SABRINA E LISI (OESTE)",
-          "Ref. Produto": "AMS-5P-00/M12-F-90G",
-          "Des. Grupo Completa": "CONECTOR M12 ANGULAR...",
-          "Marca": "ASITECH",
-          "Cidade": "GUATAMBU",
-          "Estado": "SC"
-        }
-      ]
-    }
+    Output (array direto):
+    [
+      {
+        "Cod. Cli./For.": "2803",
+        "Cliente/Fornecedor": "AURORA ABATE DE AVES",
+        "Data": "01/10/2025",
+        "Total Item": "480.00",
+        "Vendedor": "259 - SABRINA E LISI (OESTE)",
+        "Ref. Produto": "AMS-5P-00/M12-F-90G",
+        "Des. Grupo Completa": "CONECTOR M12 ANGULAR...",
+        "Marca": "ASITECH",
+        "Cidade": "GUATAMBU",
+        "Estado": "SC"
+      }
+    ]
     """
     try:
-        # Lê o body da requisição
-        raw_body = await request.body()
-        raw_str = raw_body.decode("utf-8").strip()
+        body = await request.body()
+        body_str = body.decode("utf-8").strip()
 
-        print(f"📥 Recebido request - Tamanho: {len(raw_str)} chars")
+        print(f"📥 Recebido request - Tamanho: {len(body_str)} chars")
 
         # Tenta interpretar como JSON
-        html = ""
         try:
-            payload = json.loads(raw_str)
+            payload = json.loads(body_str)
             html = payload.get("html_email", "")
             print("✅ JSON parseado com sucesso")
-        except Exception as e:
-            # Fallback: HTML puro no body
-            html = raw_str
-            print(f"⚠️ Não é JSON válido, tratando como HTML puro: {e}")
+        except:
+            html = body_str
+            print("⚠️ Não é JSON válido, tratando como HTML puro")
 
-        if not html or len(html) < 10:
-            print("❌ Nenhum HTML válido encontrado")
-            return {"data": [], "error": "HTML vazio ou inválido"}
+        if not html:
+            print("❌ HTML vazio")
+            return []
 
         # Limpa caracteres de controle
         html = re.sub(r"[\r\n\t]+", " ", html)
         
-        # Parse HTML
         soup = BeautifulSoup(html, "html.parser")
-        linhas_processadas = []
+        faturamento = []
 
-        # Procura por tabela
-        tabela = soup.find("table")
-        if not tabela:
-            print("⚠️ Nenhuma tabela encontrada no HTML")
-            return {"data": [], "error": "Nenhuma tabela encontrada"}
-
-        # Processa linhas da tabela
-        linhas_tr = tabela.find_all("tr")
-        print(f"📊 Encontradas {len(linhas_tr)} linhas na tabela")
-
-        for idx, tr in enumerate(linhas_tr):
-            # Pula cabeçalho (primeira linha geralmente)
-            if idx == 0:
-                colunas_header = [th.get_text(strip=True) for th in tr.find_all(["th", "td"])]
-                print(f"📋 Cabeçalho: {colunas_header}")
+        # Processa linhas com classe "destaca" ou "destacb"
+        for tr in soup.find_all("tr"):
+            classes = tr.get("class", []) or []
+            if not any("destac" in str(c) for c in classes):
                 continue
 
-            tds = tr.find_all("td")
-            qtd_cols = len(tds)
-
-            # Valida quantidade de colunas (esperamos 10)
-            if qtd_cols < 10:
-                print(f"⚠️ Linha {idx}: {qtd_cols} colunas (esperado 10)")
+            cells = tr.find_all("td")
+            
+            print(f"📊 Linha com {len(cells)} células")
+            
+            # ✅ ESTRUTURA DO FATURAMENTO (16 COLUNAS baseado no seu email real)
+            # cells[0]  = Cod. Cli./For.
+            # cells[1]  = Cliente/Fornecedor
+            # cells[2]  = Data
+            # cells[3]  = (vazio)
+            # cells[4]  = (vazio)
+            # cells[5]  = Ref. Produto
+            # cells[6]  = (vazio)
+            # cells[7]  = Des. Grupo Completa
+            # cells[8]  = (vazio)
+            # cells[9]  = Total Item
+            # cells[10] = (vazio)
+            # cells[11] = Vendedor
+            # cells[12] = Marca
+            # cells[13] = Cidade
+            # cells[14] = Estado
+            # cells[15] = (vazio ou outro campo)
+            
+            if len(cells) < 15:
+                print(f"⚠️ Linha ignorada: só tem {len(cells)} células (esperado 15+)")
                 continue
 
             try:
-                # Extrai valores de cada coluna
-                cod_cli_for        = tds[0].get_text(strip=True)
-                cliente_fornecedor = tds[1].get_text(strip=True)
-                data_str           = tds[2].get_text(strip=True)
-                total_bruto        = tds[3].get_text(strip=True)
-                vendedor           = tds[4].get_text(strip=True)
-                ref_produto        = tds[5].get_text(strip=True)
-                desc_grupo         = tds[6].get_text(strip=True)
-                marca              = tds[7].get_text(strip=True)
-                cidade             = tds[8].get_text(strip=True)
-                estado             = tds[9].get_text(strip=True)
+                cod_cli_for = cells[0].get_text(strip=True)
+                cliente = cells[1].get_text(strip=True)
+                data = cells[2].get_text(strip=True)
+                ref_produto = cells[5].get_text(strip=True)
+                grupo = cells[7].get_text(strip=True)
+                total_str = cells[9].get_text(strip=True)
+                vendedor = cells[11].get_text(strip=True)
+                marca = cells[12].get_text(strip=True)
+                cidade = cells[13].get_text(strip=True)
+                estado = cells[14].get_text(strip=True)
 
-                # Normaliza valor
-                total_norm = normalizar_valor_brasileiro(total_bruto)
+                # Converte valor
+                total = converter_valor_brasileiro(total_str)
 
-                # Monta registro
-                registro = {
+                # Validação básica
+                if not cliente or not total:
+                    print(f"⚠️ Registro ignorado: Cliente='{cliente}', Total='{total}'")
+                    continue
+
+                # Monta objeto
+                item = {
                     "Cod. Cli./For.": cod_cli_for,
-                    "Cliente/Fornecedor": cliente_fornecedor,
-                    "Data": data_str,
-                    "Total Item": total_norm,
+                    "Cliente/Fornecedor": cliente,
+                    "Data": data,
+                    "Total Item": total,
                     "Vendedor": vendedor,
                     "Ref. Produto": ref_produto,
-                    "Des. Grupo Completa": desc_grupo,
+                    "Des. Grupo Completa": grupo,
                     "Marca": marca,
                     "Cidade": cidade,
                     "Estado": estado
                 }
+                
+                faturamento.append(item)
 
-                linhas_processadas.append(registro)
-
-                # Log a cada 100 registros
-                if len(linhas_processadas) % 100 == 0:
-                    print(f"📦 Processados {len(linhas_processadas)} registros...")
+                print(f"💰 {cliente[:35]}... | R$ {total} | {vendedor[:30]}")
 
             except Exception as e:
-                print(f"❌ Erro ao processar linha {idx}: {e}")
+                print(f"⚠️ Erro ao processar linha: {e}")
+                # Debug: mostra células
+                for i in range(min(len(cells), 16)):
+                    print(f"   cells[{i}] = {cells[i].get_text(strip=True)[:50]}")
                 continue
 
-        print(f"✅ Total de registros processados: {len(linhas_processadas)}")
-
-        # Retorna no formato esperado pela Edge Function
-        return {
-            "data": linhas_processadas,
-            "total_registros": len(linhas_processadas),
-            "timestamp": None  # Make.com vai adicionar
-        }
+        print(f"📦 Total processado: {len(faturamento)} registros de faturamento")
+        
+        # ✅ RETORNA ARRAY DIRETO (sem wrapper "data")
+        return faturamento
 
     except Exception as e:
-        print(f"❌ Erro geral no /processar-faturamento: {e}")
+        print(f"❌ Erro geral: {e}")
         import traceback
         traceback.print_exc()
-        return {
-            "data": [],
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }
+        return []
 
 
 @app.get("/health")
