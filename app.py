@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 import json
 import re
 
-app = FastAPI(title="Processar Faturamento API", version="3.0")
+app = FastAPI(title="Processar Faturamento API", version="4.0")
 
 # CORS para permitir chamadas do Make.com
 app.add_middleware(
