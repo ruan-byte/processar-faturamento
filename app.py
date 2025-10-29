@@ -60,54 +60,54 @@ async def processar_faturamento(request: Request):
         soup = BeautifulSoup(html, "html.parser")
         faturamento = []
 
-        for tr in soup.find_all("tr"):
-            classes = tr.get("class", []) or []
-            if not any("destac" in str(c) for c in classes):
-                continue
+     for tr in soup.find_all("tr"):
+    classes = tr.get("class", []) or []
+    if not any("destac" in str(c) for c in classes):
+        continue
 
-            cells = tr.find_all("td")
-            if len(cells) < 16:
-                print(f"⚠️ Linha ignorada ({len(cells)} colunas, esperado ≥ 16)")
-                continue
+    cells = tr.find_all("td")
+    if len(cells) < 10:
+        print(f"⚠️ Linha ignorada ({len(cells)} colunas, esperado ≥ 10)")
+        continue
 
-            try:
-                cod_cli_for = cells[0].get_text(strip=True)
-                cliente = cells[1].get_text(strip=True)
-                data = cells[2].get_text(strip=True)
-                ref_produto = cells[5].get_text(strip=True)
-                grupo = cells[7].get_text(strip=True)
-                total_str = cells[9].get_text(strip=True)
-                vendedor = cells[11].get_text(strip=True)
-                marca = cells[12].get_text(strip=True)
-                cidade = cells[13].get_text(strip=True)
-                estado = cells[14].get_text(strip=True)
+    try:
+        cod_cli_for = cells[0].get_text(strip=True)
+        cliente = cells[1].get_text(strip=True)
+        data = cells[2].get_text(strip=True)
+        total_str = cells[3].get_text(strip=True)
+        vendedor = cells[4].get_text(strip=True)
+        ref_produto = cells[5].get_text(strip=True)
+        grupo = cells[6].get_text(strip=True)
+        marca = cells[7].get_text(strip=True)
+        cidade = cells[8].get_text(strip=True)
+        estado = cells[9].get_text(strip=True)
 
-                total = converter_valor_brasileiro(total_str)
+        total = converter_valor_brasileiro(total_str)
 
-                if not cliente or not total:
-                    continue
+        if not cliente or not total:
+            continue
 
-                item = {
-                    "Cod. Cli./For.": cod_cli_for,
-                    "Cliente/Fornecedor": cliente,
-                    "Data": data,
-                    "Total Item": total,
-                    "Vendedor": vendedor,
-                    "Ref. Produto": ref_produto,
-                    "Des. Grupo Completa": grupo,
-                    "Marca": marca,
-                    "Cidade": cidade,
-                    "Estado": estado
-                }
+        item = {
+            "Cod. Cli./For.": cod_cli_for,
+            "Cliente/Fornecedor": cliente,
+            "Data": data,
+            "Total Item": total,
+            "Vendedor": vendedor,
+            "Ref. Produto": ref_produto,
+            "Des. Grupo Completa": grupo,
+            "Marca": marca,
+            "Cidade": cidade,
+            "Estado": estado
+        }
 
-                faturamento.append(item)
-                print(f"💰 {cliente[:30]}... | R$ {total} | {vendedor[:25]}")
+        faturamento.append(item)
+        print(f"💰 {cliente[:30]}... | R$ {total} | {vendedor[:25]}")
 
-            except Exception as e:
-                print(f"⚠️ Erro ao processar linha: {e}")
-                for i, td in enumerate(cells[:16]):
-                    print(f"   cells[{i}] = {td.get_text(strip=True)}")
-                continue
+    except Exception as e:
+        print(f"⚠️ Erro ao processar linha: {e}")
+        for i, td in enumerate(cells[:10]):
+            print(f"   cells[{i}] = {td.get_text(strip=True)}")
+        continue
 
         print(f"📦 Total processado: {len(faturamento)} registros")
         return faturamento
