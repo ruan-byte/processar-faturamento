@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 import json
 import re
 
-app = FastAPI(title="Processar Faturamento API", version="4.0")
+app = FastAPI(title="Processar Faturamento API", version="3.0")
 
 # CORS para permitir chamadas do Make.com
 app.add_middleware(
@@ -144,46 +144,47 @@ async def processar_faturamento(request: Request):
             
             print(f"📊 Linha com {len(cells)} células")
             
-            # ✅ ESTRUTURA DO FATURAMENTO (16 COLUNAS baseado no seu email real)
+            # ✅ ESTRUTURA DO FATURAMENTO (10 COLUNAS - ESTRUTURA REAL)
             # cells[0]  = Cod. Cli./For.
             # cells[1]  = Cliente/Fornecedor
             # cells[2]  = Data
-            # cells[3]  = (vazio)
-            # cells[4]  = (vazio)
+            # cells[3]  = Total Item
+            # cells[4]  = Vendedor
             # cells[5]  = Ref. Produto
-            # cells[6]  = (vazio)
-            # cells[7]  = Des. Grupo Completa
-            # cells[8]  = (vazio)
-            # cells[9]  = Total Item
-            # cells[10] = (vazio)
-            # cells[11] = Vendedor
-            # cells[12] = Marca
-            # cells[13] = Cidade
-            # cells[14] = Estado
-            # cells[15] = (vazio ou outro campo)
+            # cells[6]  = Des. Grupo Completa
+            # cells[7]  = Marca
+            # cells[8]  = Cidade
+            # cells[9]  = Estado
             
-            if len(cells) < 15:
-                print(f"⚠️ Linha ignorada: só tem {len(cells)} células (esperado 15+)")
+            if len(cells) < 10:
+                print(f"⚠️ Linha ignorada: só tem {len(cells)} células (esperado 10)")
                 continue
 
             try:
                 cod_cli_for = cells[0].get_text(strip=True)
                 cliente = cells[1].get_text(strip=True)
                 data = cells[2].get_text(strip=True)
+                total_str = cells[3].get_text(strip=True)
+                vendedor = cells[4].get_text(strip=True)
                 ref_produto = cells[5].get_text(strip=True)
-                grupo = cells[7].get_text(strip=True)
-                total_str = cells[9].get_text(strip=True)
-                vendedor = cells[11].get_text(strip=True)
-                marca = cells[12].get_text(strip=True)
-                cidade = cells[13].get_text(strip=True)
-                estado = cells[14].get_text(strip=True)
+                grupo = cells[6].get_text(strip=True)
+                marca = cells[7].get_text(strip=True)
+                cidade = cells[8].get_text(strip=True)
+                estado = cells[9].get_text(strip=True)
 
                 # Converte valor
                 total = converter_valor_brasileiro(total_str)
 
+                # ⚠️ CASO ESPECIAL: Primeira linha às vezes tem cliente vazio
+                # Se cliente vazio, pega do vendedor da linha seguinte
+                if not cliente or cliente == "":
+                    # Tenta pegar cliente da próxima linha ou usar código como fallback
+                    cliente = f"CLIENTE_{cod_cli_for}"
+                    print(f"⚠️ Cliente vazio, usando fallback: {cliente}")
+
                 # Validação básica
-                if not cliente or not total:
-                    print(f"⚠️ Registro ignorado: Cliente='{cliente}', Total='{total}'")
+                if not total or total == "0":
+                    print(f"⚠️ Registro ignorado: Total zerado ou inválido")
                     continue
 
                 # Monta objeto
