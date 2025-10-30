@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 import json
 import re
 
-app = FastAPI(title="Processar Faturamento API", version="3.0")
+app = FastAPI(title="Processar Faturamento API", version="5.0-FINAL")
 
 # CORS para permitir chamadas do Make.com
 app.add_middleware(
@@ -20,8 +20,8 @@ async def root():
     return {
         "status": "online",
         "service": "processar-faturamento",
-        "version": "3.0",
-        "note": "Retorna array direto, sem wrapper 'data'",
+        "version": "5.0-FINAL",
+        "note": "Retorna array direto com JSON limpo e validado",
         "expected_columns": [
             "Cod. Cli./For.",
             "Cliente/Fornecedor",
@@ -35,6 +35,34 @@ async def root():
             "Estado"
         ]
     }
+
+def clean_json_value(value):
+    """
+    Remove caracteres problemáticos que quebram JSON.
+    - Quebras de linha
+    - Tabs
+    - Múltiplos espaços
+    - Caracteres de controle
+    """
+    if value is None:
+        return ""
+    
+    value_str = str(value).strip()
+    
+    # Remove quebras de linha e retorno de carro
+    value_str = value_str.replace('\n', ' ').replace('\r', ' ')
+    
+    # Remove tabs
+    value_str = value_str.replace('\t', ' ')
+    
+    # Remove caracteres de controle Unicode
+    value_str = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', value_str)
+    
+    # Remove múltiplos espaços
+    value_str = ' '.join(value_str.split())
+    
+    return value_str
+
 
 def converter_valor_brasileiro(valor_str: str) -> str:
     """
@@ -86,7 +114,7 @@ def converter_valor_brasileiro(valor_str: str) -> str:
 async def processar_faturamento(request: Request):
     """
     IMPORTANTE: Retorna array DIRETO (sem wrapper "data")
-    Para ser compatível com Iterator do Make.com
+    JSON limpo e validado, sem caracteres que quebram parsing
     
     Input:
     {
@@ -144,50 +172,48 @@ async def processar_faturamento(request: Request):
             
             print(f"📊 Linha com {len(cells)} células")
             
-            # ✅ ESTRUTURA DO FATURAMENTO (10 COLUNAS - ESTRUTURA REAL)
+            # ✅ ESTRUTURA DO FATURAMENTO (baseada no código original)
             # cells[0]  = Cod. Cli./For.
             # cells[1]  = Cliente/Fornecedor
             # cells[2]  = Data
-            # cells[3]  = Total Item
-            # cells[4]  = Vendedor
             # cells[5]  = Ref. Produto
-            # cells[6]  = Des. Grupo Completa
-            # cells[7]  = Marca
-            # cells[8]  = Cidade
-            # cells[9]  = Estado
+            # cells[7]  = Des. Grupo Completa
+            # cells[9]  = Total Item
+            # cells[11] = Vendedor
+            # cells[12] = Marca
+            # cells[13] = Cidade
+            # cells[14] = Estado
             
-            if len(cells) < 10:
-                print(f"⚠️ Linha ignorada: só tem {len(cells)} células (esperado 10)")
+            if len(cells) < 16:
+                print(f"⚠️ Linha ignorada: só tem {len(cells)} células (esperado >= 16)")
                 continue
 
             try:
-                cod_cli_for = cells[0].get_text(strip=True)
-                cliente = cells[1].get_text(strip=True)
-                data = cells[2].get_text(strip=True)
-                total_str = cells[3].get_text(strip=True)
-                vendedor = cells[4].get_text(strip=True)
-                ref_produto = cells[5].get_text(strip=True)
-                grupo = cells[6].get_text(strip=True)
-                marca = cells[7].get_text(strip=True)
-                cidade = cells[8].get_text(strip=True)
-                estado = cells[9].get_text(strip=True)
+                # ✅ EXTRAI E LIMPA CADA CAMPO
+                cod_cli_for = clean_json_value(cells[0].get_text(strip=True))
+                cliente = clean_json_value(cells[1].get_text(strip=True))
+                data = clean_json_value(cells[2].get_text(strip=True))
+                ref_produto = clean_json_value(cells[5].get_text(strip=True))
+                grupo = clean_json_value(cells[7].get_text(strip=True))
+                total_str = clean_json_value(cells[9].get_text(strip=True))
+                vendedor = clean_json_value(cells[11].get_text(strip=True))
+                marca = clean_json_value(cells[12].get_text(strip=True))
+                cidade = clean_json_value(cells[13].get_text(strip=True))
+                estado = clean_json_value(cells[14].get_text(strip=True))
 
                 # Converte valor
                 total = converter_valor_brasileiro(total_str)
 
-                # ⚠️ CASO ESPECIAL: Primeira linha às vezes tem cliente vazio
-                # Se cliente vazio, pega do vendedor da linha seguinte
+                # Validação básica
                 if not cliente or cliente == "":
-                    # Tenta pegar cliente da próxima linha ou usar código como fallback
                     cliente = f"CLIENTE_{cod_cli_for}"
                     print(f"⚠️ Cliente vazio, usando fallback: {cliente}")
 
-                # Validação básica
                 if not total or total == "0":
                     print(f"⚠️ Registro ignorado: Total zerado ou inválido")
                     continue
 
-                # Monta objeto
+                # ✅ MONTA OBJETO COM VALORES LIMPOS
                 item = {
                     "Cod. Cli./For.": cod_cli_for,
                     "Cliente/Fornecedor": cliente,
@@ -213,6 +239,15 @@ async def processar_faturamento(request: Request):
                 continue
 
         print(f"📦 Total processado: {len(faturamento)} registros de faturamento")
+        
+        # ✅ VALIDA JSON ANTES DE RETORNAR
+        try:
+            # Tenta serializar para garantir que é JSON válido
+            json_test = json.dumps(faturamento)
+            print(f"✅ JSON validado com sucesso - {len(json_test)} bytes")
+        except Exception as e:
+            print(f"❌ ERRO: JSON inválido gerado! {e}")
+            return []
         
         # ✅ RETORNA ARRAY DIRETO (sem wrapper "data")
         return faturamento
