@@ -1,84 +1,34 @@
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from bs4 import BeautifulSoup
 import json
 import re
 
-app = FastAPI(title="Processar Faturamento API", version="6.0-FIXED")
-
-# CORS para permitir chamadas do Make.com
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {
-        "status": "online",
-        "service": "processar-faturamento",
-        "version": "6.0-FIXED",
-        "note": "Versão corrigida para estrutura HTML com 10 colunas",
-        "expected_columns": [
-            "Cod. Cli./For.",
-            "Cliente/Fornecedor",
-            "Data",
-            "Total Item",
-            "Vendedor",
-            "Ref. Produto",
-            "Des. Grupo Completa",
-            "Marca",
-            "Cidade",
-            "Estado"
-        ]
-    }
-
-def clean_json_value(value):
-    """
-    Remove caracteres problemáticos que quebram JSON.
-    """
-    if value is None:
-        return ""
-    
-    value_str = str(value).strip()
-    
-    # Remove quebras de linha e retorno de carro
-    value_str = value_str.replace('\n', ' ').replace('\r', ' ')
-    
-    # Remove tabs
-    value_str = value_str.replace('\t', ' ')
-    
-    # Remove caracteres de controle Unicode
-    value_str = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', value_str)
-    
-    # Remove múltiplos espaços
-    value_str = ' '.join(value_str.split())
-    
-    return value_str
-
+    return {"status": "online", "version": "5.0"}
 
 def converter_valor_brasileiro(valor_str: str) -> str:
     """
     Converte valores do formato brasileiro para formato numérico.
-    PRESERVA valores negativos (devoluções).
+    ⚠️ PRESERVA VALORES NEGATIVOS (devoluções)
+    
     Exemplos:
     - "18.629,20" -> "18629.20"
-    - "-1.040,00" -> "-1040.00" (mantém negativo para devoluções)
+    - "-1.040,00" -> "-1040.00" ✅ (devolução)
+    - "9.455,00" -> "9455.00"
     - "373,50" -> "373.50"
+    - "1.620,00" -> "1620.00"
     """
     try:
         # Remove espaços
         valor_limpo = valor_str.strip()
         
-        # Verifica se é negativo
+        # ✅ Verifica se é negativo (DEVOLUÇÃO)
         is_negative = valor_limpo.startswith('-')
-        
-        # Remove sinal temporariamente para processar
         if is_negative:
-            valor_limpo = valor_limpo[1:]
+            valor_limpo = valor_limpo[1:].strip()  # Remove o sinal temporariamente
         
         # Remove qualquer caractere que não seja número, ponto ou vírgula
         valor_limpo = re.sub(r'[^\d,.]', '', valor_limpo)
@@ -103,7 +53,7 @@ def converter_valor_brasileiro(valor_str: str) -> str:
                 # Provavelmente milhar: "1.234" -> "1234"
                 valor_final = valor_limpo.replace('.', '')
         
-        # Restaura o sinal negativo se necessário
+        # ✅ Restaura o sinal negativo se for devolução
         if is_negative:
             valor_final = '-' + valor_final
         
@@ -116,116 +66,148 @@ def converter_valor_brasileiro(valor_str: str) -> str:
         print(f"❌ Erro ao converter valor '{valor_str}': {e}")
         return "0"
 
-
 @app.post("/processar-faturamento")
 async def processar_faturamento(request: Request):
     """
-    Processa HTML de faturamento e retorna array JSON.
+    Processa HTML de email de faturamento e retorna array de objetos.
     
-    Estrutura do HTML:
-    - 10 colunas visíveis na tabela
-    - Células com índices 0-9
+    ⚠️ ATENÇÃO: O HTML tem tags <tr> malformadas (não fechadas).
+    Usa html5lib parser que é mais tolerante.
     
-    Mapeamento correto das colunas:
-    - cells[0] = Cod. Cli./For.
-    - cells[1] = Cliente/Fornecedor
-    - cells[2] = Data
-    - cells[3] = Total Item
-    - cells[4] = Vendedor
-    - cells[5] = Ref. Produto
-    - cells[6] = Des. Grupo Completa
-    - cells[7] = Marca
-    - cells[8] = Cidade
-    - cells[9] = Estado
+    ESTRUTURA ESPERADA DA TABELA (10 colunas):
+    cells[0]  = Cod. Cli./For.
+    cells[1]  = Cliente/Fornecedor
+    cells[2]  = Data
+    cells[3]  = Total Item
+    cells[4]  = Vendedor
+    cells[5]  = Ref. Produto
+    cells[6]  = Des. Grupo Completa
+    cells[7]  = Marca
+    cells[8]  = Cidade
+    cells[9]  = Estado
+    
+    Retorna:
+    [
+      {
+        "Cod. Cli./For.": "642",
+        "Cliente/Fornecedor": "METALBO",
+        "Data": "30/10/2025",
+        "Total Item": "3740.00",
+        "Vendedor": "21 - CAMILY E PADILHA (VALE)",
+        "Ref. Produto": "42M2N032A0100",
+        "Des. Grupo Completa": "CIL. Ø32X100 D. ACAO D. AMORT. MAG.",
+        "Marca": "CAMOZZI",
+        "Cidade": "TROMBUDO CENTRAL",
+        "Estado": "SC"
+      }
+    ]
     """
     try:
         body = await request.body()
         body_str = body.decode("utf-8").strip()
 
-        print(f"📥 Recebido request - Tamanho: {len(body_str)} chars")
-
-        # Tenta interpretar como JSON
         try:
             payload = json.loads(body_str)
             html = payload.get("html_email", "")
-            print("✅ JSON parseado com sucesso")
         except:
             html = body_str
-            print("⚠️ Não é JSON válido, tratando como HTML puro")
 
         if not html:
-            print("❌ HTML vazio")
+            print("❌ HTML vazio!")
             return []
 
-        # Limpa caracteres de controle
-        html = re.sub(r"[\r\n\t]+", " ", html)
+        print(f"📥 HTML recebido: {len(html)} caracteres")
         
-        soup = BeautifulSoup(html, "html.parser")
+        # ✅ USA html5lib PARA PARSEAR HTML MALFORMADO
+        try:
+            soup = BeautifulSoup(html, 'html5lib')
+        except:
+            print("⚠️ html5lib não disponível, usando html.parser")
+            soup = BeautifulSoup(html, 'html.parser')
+        
         faturamento = []
+        linhas_processadas = 0
+        linhas_ignoradas = 0
+        devolucoes = 0
+        
+        print("🔍 Procurando linhas com classe 'destaca' ou 'destacb'...")
 
-        # Debug: vamos verificar a estrutura primeiro
-        sample_row = soup.find("tr", {"class": ["destaca", "destacb"]})
-        if sample_row:
-            sample_cells = sample_row.find_all("td")
-            print(f"📊 Debug: Linha exemplo tem {len(sample_cells)} células")
-            if len(sample_cells) >= 10:
-                for i in range(10):
-                    print(f"   Cell[{i}]: {sample_cells[i].get_text(strip=True)[:50]}")
-
-        # Processa linhas com classe "destaca" ou "destacb"
         for tr in soup.find_all("tr"):
-            # Verifica se tem uma das classes
-            tr_class = tr.get("class", [])
-            if not tr_class:
-                continue
+            classes = tr.get("class", []) or []
             
-            # Converte para string se for lista
-            class_str = " ".join(tr_class) if isinstance(tr_class, list) else str(tr_class)
-            
-            # Verifica se é uma linha de dados
-            if "destaca" not in class_str and "destacb" not in class_str:
+            # Verifica se tem classe de faturamento
+            if not any("destac" in str(c) for c in classes):
                 continue
 
             cells = tr.find_all("td")
+            linhas_processadas += 1
             
-            # HTML tem exatamente 10 colunas
-            if len(cells) < 10:
-                print(f"⚠️ Linha ignorada: só tem {len(cells)} células (esperado 10)")
+            print(f"\n📋 Processando linha {linhas_processadas} com {len(cells)} células")
+            
+            # ✅ Validação: deve ter exatamente 10 colunas
+            if len(cells) != 10:
+                print(f"⚠️ Linha {linhas_processadas} ignorada: tem {len(cells)} células (esperado 10)")
+                linhas_ignoradas += 1
+                
+                # 🐛 DEBUG: Mostra o conteúdo para diagnóstico
+                if len(cells) > 0:
+                    for i in range(min(len(cells), 10)):
+                        texto = cells[i].get_text(strip=True)[:60]
+                        print(f"   cells[{i}] = {texto}")
+                
                 continue
 
             try:
-                # ✅ EXTRAI E LIMPA CADA CAMPO (índices 0-9)
-                cod_cli_for = clean_json_value(cells[0].get_text(strip=True))
-                cliente = clean_json_value(cells[1].get_text(strip=True))
-                data = clean_json_value(cells[2].get_text(strip=True))
-                total_str = clean_json_value(cells[3].get_text(strip=True))
-                vendedor = clean_json_value(cells[4].get_text(strip=True))
-                ref_produto = clean_json_value(cells[5].get_text(strip=True))
-                grupo = clean_json_value(cells[6].get_text(strip=True))
-                marca = clean_json_value(cells[7].get_text(strip=True))
-                cidade = clean_json_value(cells[8].get_text(strip=True))
-                estado = clean_json_value(cells[9].get_text(strip=True))
-
-                # Converte valor (preserva sinal negativo se for devolução)
+                # ✅ EXTRAÇÃO COM ÍNDICES CORRETOS (10 colunas)
+                cod_cli_for = cells[0].get_text(strip=True)      # Cod. Cli./For.
+                cliente = cells[1].get_text(strip=True)          # Cliente/Fornecedor
+                data = cells[2].get_text(strip=True)             # Data
+                total_str = cells[3].get_text(strip=True)        # Total Item
+                vendedor = cells[4].get_text(strip=True)         # Vendedor
+                ref_produto = cells[5].get_text(strip=True)      # Ref. Produto
+                grupo = cells[6].get_text(strip=True)            # Des. Grupo Completa
+                marca = cells[7].get_text(strip=True)            # Marca
+                cidade = cells[8].get_text(strip=True)           # Cidade
+                estado = cells[9].get_text(strip=True)           # Estado
+                
+                print(f"   Cliente: {cliente[:40]}...")
+                print(f"   Total (raw): {total_str}")
+                
+                # ✅ Converte o valor (PRESERVA SINAL NEGATIVO)
                 total = converter_valor_brasileiro(total_str)
-
-                # Validação básica
-                if not cliente or cliente == "":
-                    # Se cliente está vazio, pula este registro
-                    print(f"⚠️ Registro ignorado: Cliente vazio")
+                print(f"   Total (convertido): {total}")
+                
+                # ✅ Validação mínima: campos obrigatórios
+                if not cliente or not data:
+                    print(f"⚠️ Linha ignorada por dados incompletos:")
+                    print(f"   Cliente: '{cliente}', Data: '{data}'")
+                    linhas_ignoradas += 1
                     continue
-
-                # Aceita valores negativos (devoluções) e positivos
-                if total == "0":
-                    print(f"⚠️ Registro ignorado: Total zerado")
+                
+                # ✅ Validação do valor total (ACEITA NEGATIVOS)
+                try:
+                    valor_float = float(total)
+                    if valor_float == 0:
+                        print(f"⚠️ Linha ignorada: valor zerado")
+                        linhas_ignoradas += 1
+                        continue
+                    
+                    # 💸 Marca devoluções
+                    if valor_float < 0:
+                        devolucoes += 1
+                        print(f"💸 DEVOLUÇÃO detectada: R$ {total}")
+                        
+                except ValueError:
+                    print(f"⚠️ Linha ignorada: não foi possível converter total '{total_str}'")
+                    linhas_ignoradas += 1
                     continue
-
-                # ✅ MONTA OBJETO COM VALORES LIMPOS
+                
+                # ✅ Cria objeto do faturamento
                 item = {
                     "Cod. Cli./For.": cod_cli_for,
                     "Cliente/Fornecedor": cliente,
                     "Data": data,
-                    "Total Item": total,
+                    "Total Item": total,  # ✅ PODE SER NEGATIVO
                     "Vendedor": vendedor,
                     "Ref. Produto": ref_produto,
                     "Des. Grupo Completa": grupo,
@@ -233,27 +215,31 @@ async def processar_faturamento(request: Request):
                     "Cidade": cidade,
                     "Estado": estado
                 }
-                
                 faturamento.append(item)
-
-                print(f"✅ {cliente[:30]}... | R$ {total} | {vendedor[:25]}...")
-
-            except Exception as e:
-                print(f"⚠️ Erro ao processar linha: {e}")
+                
+                simbolo = "💸" if valor_float < 0 else "✅"
+                print(f"{simbolo} {cliente[:35]}... | R$ {total} | {vendedor[:30]}")
+                
+            except (IndexError, AttributeError, ValueError) as e:
+                print(f"❌ Erro ao processar linha {linhas_processadas}: {e}")
+                print(f"   Tipo de erro: {type(e).__name__}")
+                linhas_ignoradas += 1
+                import traceback
+                traceback.print_exc()
                 continue
 
-        print(f"📦 Total processado: {len(faturamento)} registros de faturamento")
+        # 📊 Resumo do processamento
+        vendas = len(faturamento) - devolucoes
+        print(f"\n{'='*60}")
+        print(f"📊 RESUMO DO PROCESSAMENTO")
+        print(f"{'='*60}")
+        print(f"✅ Registros processados: {len(faturamento)}")
+        print(f"   📈 Vendas: {vendas}")
+        print(f"   💸 Devoluções: {devolucoes}")
+        print(f"⚠️ Linhas ignoradas: {linhas_ignoradas}")
+        print(f"📝 Total de linhas analisadas: {linhas_processadas}")
+        print(f"{'='*60}\n")
         
-        # ✅ VALIDA JSON ANTES DE RETORNAR
-        try:
-            # Tenta serializar para garantir que é JSON válido
-            json_test = json.dumps(faturamento, ensure_ascii=False)
-            print(f"✅ JSON validado com sucesso - {len(json_test)} bytes")
-        except Exception as e:
-            print(f"❌ ERRO: JSON inválido gerado! {e}")
-            return []
-        
-        # ✅ RETORNA ARRAY DIRETO
         return faturamento
 
     except Exception as e:
@@ -262,8 +248,148 @@ async def processar_faturamento(request: Request):
         traceback.print_exc()
         return []
 
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "service": "processar-faturamento", "version": "6.0-FIXED"}
+@app.post("/processar-pedidos")
+async def processar_pedidos(request: Request):
+    """
+    Processa HTML de email e retorna array de pedidos.
+    
+    ⚠️ ATENÇÃO: O HTML recebido tem tags <tr> malformadas (não fechadas).
+    Usamos html5lib parser que é mais tolerante a HTML malformado.
+    
+    ESTRUTURA ESPERADA DA TABELA (12 colunas):
+    cells[0]  = Data
+    cells[1]  = DtEntrPro (Entrega Prod.)
+    cells[2]  = Nr. Ped
+    cells[3]  = Cod. Cli
+    cells[4]  = Cliente
+    cells[5]  = Cod. Vend
+    cells[6]  = Vendedor
+    cells[7]  = Prazo
+    cells[8]  = CFOP
+    cells[9]  = Sit. Fat
+    cells[10] = Total
+    cells[11] = Empresa
+    """
+    try:
+        body = await request.body()
+        body_str = body.decode('utf-8').strip()
+        
+        try:
+            payload = json.loads(body_str)
+            html = payload.get("html_email", "")
+        except:
+            html = body_str
+        
+        if not html:
+            print("❌ HTML vazio!")
+            return []
+        
+        print(f"📥 HTML recebido: {len(html)} caracteres")
+        
+        # ✅ USA html5lib PARA PARSEAR HTML MALFORMADO
+        try:
+            soup = BeautifulSoup(html, 'html5lib')
+        except:
+            print("⚠️ html5lib não disponível, usando html.parser")
+            soup = BeautifulSoup(html, 'html.parser')
+        
+        pedidos = []
+        linhas_processadas = 0
+        linhas_ignoradas = 0
+        
+        print("🔍 Procurando linhas com classe 'destaca' ou 'destacb'...")
+        
+        for tr in soup.find_all('tr'):
+            classes = tr.get('class', []) if tr.get('class') else []
+            
+            if not any('destac' in str(c) for c in classes):
+                continue
+            
+            cells = tr.find_all('td')
+            linhas_processadas += 1
+            
+            print(f"\n📋 Processando linha {linhas_processadas} com {len(cells)} células")
+            
+            if len(cells) != 12:
+                print(f"⚠️ Linha {linhas_processadas} ignorada: tem {len(cells)} células (esperado 12)")
+                linhas_ignoradas += 1
+                
+                for i in range(min(12, len(cells))):
+                    valor = cells[i].get_text(strip=True)[:60]
+                    print(f"   cells[{i}] = {valor}")
+                
+                continue
+            
+            try:
+                data_pedido = cells[0].get_text(strip=True)
+                entrega_prod = cells[1].get_text(strip=True)
+                nr_pedido = cells[2].get_text(strip=True)
+                cod_cli = cells[3].get_text(strip=True)
+                cliente = cells[4].get_text(strip=True)
+                cod_vend = cells[5].get_text(strip=True)
+                vendedor = cells[6].get_text(strip=True)
+                prazo = cells[7].get_text(strip=True)
+                cfop = cells[8].get_text(strip=True)
+                sit_fat = cells[9].get_text(strip=True)
+                total_str = cells[10].get_text(strip=True)
+                empresa = cells[11].get_text(strip=True)
+                
+                print(f"   Nr. Pedido: {nr_pedido}")
+                print(f"   Cliente: {cliente[:40]}...")
+                print(f"   Total (raw): {total_str}")
+                
+                total = converter_valor_brasileiro(total_str)
+                print(f"   Total (convertido): {total}")
+                
+                if not nr_pedido or not cliente or not data_pedido:
+                    print(f"⚠️ Pedido ignorado por dados incompletos:")
+                    print(f"   Nr.Ped: '{nr_pedido}', Cliente: '{cliente}', Data: '{data_pedido}'")
+                    linhas_ignoradas += 1
+                    continue
+                
+                try:
+                    valor_float = float(total)
+                    if valor_float <= 0:
+                        print(f"⚠️ Pedido {nr_pedido} ignorado: valor inválido R$ {total}")
+                        linhas_ignoradas += 1
+                        continue
+                except ValueError:
+                    print(f"⚠️ Pedido {nr_pedido} ignorado: não foi possível converter total '{total_str}'")
+                    linhas_ignoradas += 1
+                    continue
+                
+                pedido = {
+                    "Data": data_pedido,
+                    "Entrega Prod.": entrega_prod if entrega_prod else "",
+                    "Nr. Ped": nr_pedido,
+                    "Cliente": cliente,
+                    "Vendedor": vendedor,
+                    "Total": total
+                }
+                pedidos.append(pedido)
+                
+                print(f"✅ Pedido {nr_pedido}: {cliente[:40]}... - R$ {total} | {vendedor[:30]}")
+                
+            except (IndexError, AttributeError, ValueError) as e:
+                print(f"❌ Erro ao processar linha {linhas_processadas}: {e}")
+                print(f"   Tipo de erro: {type(e).__name__}")
+                linhas_ignoradas += 1
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        print(f"\n{'='*60}")
+        print(f"📊 RESUMO DO PROCESSAMENTO")
+        print(f"{'='*60}")
+        print(f"✅ Pedidos processados com sucesso: {len(pedidos)}")
+        print(f"⚠️ Linhas ignoradas: {linhas_ignoradas}")
+        print(f"📝 Total de linhas analisadas: {linhas_processadas}")
+        print(f"{'='*60}\n")
+        
+        return pedidos
+    
+    except Exception as e:
+        print(f"❌ Erro geral no processamento: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
