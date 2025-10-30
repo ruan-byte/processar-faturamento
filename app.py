@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 import json
 import re
 
-app = FastAPI(title="Processar Faturamento API", version="5.0-FINAL")
+app = FastAPI(title="Processar Faturamento API", version="6.0-FIXED")
 
 # CORS para permitir chamadas do Make.com
 app.add_middleware(
@@ -20,8 +20,8 @@ async def root():
     return {
         "status": "online",
         "service": "processar-faturamento",
-        "version": "5.0-FINAL",
-        "note": "Retorna array direto com JSON limpo e validado",
+        "version": "6.0-FIXED",
+        "note": "Versão corrigida para estrutura HTML com 10 colunas",
         "expected_columns": [
             "Cod. Cli./For.",
             "Cliente/Fornecedor",
@@ -39,10 +39,6 @@ async def root():
 def clean_json_value(value):
     """
     Remove caracteres problemáticos que quebram JSON.
-    - Quebras de linha
-    - Tabs
-    - Múltiplos espaços
-    - Caracteres de controle
     """
     if value is None:
         return ""
@@ -67,15 +63,22 @@ def clean_json_value(value):
 def converter_valor_brasileiro(valor_str: str) -> str:
     """
     Converte valores do formato brasileiro para formato numérico.
+    PRESERVA valores negativos (devoluções).
     Exemplos:
     - "18.629,20" -> "18629.20"
-    - "9.455,00" -> "9455.00"
+    - "-1.040,00" -> "-1040.00" (mantém negativo para devoluções)
     - "373,50" -> "373.50"
-    - "1.620,00" -> "1620.00"
     """
     try:
         # Remove espaços
         valor_limpo = valor_str.strip()
+        
+        # Verifica se é negativo
+        is_negative = valor_limpo.startswith('-')
+        
+        # Remove sinal temporariamente para processar
+        if is_negative:
+            valor_limpo = valor_limpo[1:]
         
         # Remove qualquer caractere que não seja número, ponto ou vírgula
         valor_limpo = re.sub(r'[^\d,.]', '', valor_limpo)
@@ -100,6 +103,10 @@ def converter_valor_brasileiro(valor_str: str) -> str:
                 # Provavelmente milhar: "1.234" -> "1234"
                 valor_final = valor_limpo.replace('.', '')
         
+        # Restaura o sinal negativo se necessário
+        if is_negative:
+            valor_final = '-' + valor_final
+        
         # Valida se é um número válido
         float(valor_final)
         
@@ -113,29 +120,23 @@ def converter_valor_brasileiro(valor_str: str) -> str:
 @app.post("/processar-faturamento")
 async def processar_faturamento(request: Request):
     """
-    IMPORTANTE: Retorna array DIRETO (sem wrapper "data")
-    JSON limpo e validado, sem caracteres que quebram parsing
+    Processa HTML de faturamento e retorna array JSON.
     
-    Input:
-    {
-      "html_email": "<table>...</table>"
-    }
+    Estrutura do HTML:
+    - 10 colunas visíveis na tabela
+    - Células com índices 0-9
     
-    Output (array direto):
-    [
-      {
-        "Cod. Cli./For.": "2803",
-        "Cliente/Fornecedor": "AURORA ABATE DE AVES",
-        "Data": "01/10/2025",
-        "Total Item": "480.00",
-        "Vendedor": "259 - SABRINA E LISI (OESTE)",
-        "Ref. Produto": "AMS-5P-00/M12-F-90G",
-        "Des. Grupo Completa": "CONECTOR M12 ANGULAR...",
-        "Marca": "ASITECH",
-        "Cidade": "GUATAMBU",
-        "Estado": "SC"
-      }
-    ]
+    Mapeamento correto das colunas:
+    - cells[0] = Cod. Cli./For.
+    - cells[1] = Cliente/Fornecedor
+    - cells[2] = Data
+    - cells[3] = Total Item
+    - cells[4] = Vendedor
+    - cells[5] = Ref. Produto
+    - cells[6] = Des. Grupo Completa
+    - cells[7] = Marca
+    - cells[8] = Cidade
+    - cells[9] = Estado
     """
     try:
         body = await request.body()
@@ -162,55 +163,61 @@ async def processar_faturamento(request: Request):
         soup = BeautifulSoup(html, "html.parser")
         faturamento = []
 
+        # Debug: vamos verificar a estrutura primeiro
+        sample_row = soup.find("tr", {"class": ["destaca", "destacb"]})
+        if sample_row:
+            sample_cells = sample_row.find_all("td")
+            print(f"📊 Debug: Linha exemplo tem {len(sample_cells)} células")
+            if len(sample_cells) >= 10:
+                for i in range(10):
+                    print(f"   Cell[{i}]: {sample_cells[i].get_text(strip=True)[:50]}")
+
         # Processa linhas com classe "destaca" ou "destacb"
         for tr in soup.find_all("tr"):
-            classes = tr.get("class", []) or []
-            if not any("destac" in str(c) for c in classes):
+            # Verifica se tem uma das classes
+            tr_class = tr.get("class", [])
+            if not tr_class:
+                continue
+            
+            # Converte para string se for lista
+            class_str = " ".join(tr_class) if isinstance(tr_class, list) else str(tr_class)
+            
+            # Verifica se é uma linha de dados
+            if "destaca" not in class_str and "destacb" not in class_str:
                 continue
 
             cells = tr.find_all("td")
             
-            print(f"📊 Linha com {len(cells)} células")
-            
-            # ✅ ESTRUTURA DO FATURAMENTO (baseada no código original)
-            # cells[0]  = Cod. Cli./For.
-            # cells[1]  = Cliente/Fornecedor
-            # cells[2]  = Data
-            # cells[5]  = Ref. Produto
-            # cells[7]  = Des. Grupo Completa
-            # cells[9]  = Total Item
-            # cells[11] = Vendedor
-            # cells[12] = Marca
-            # cells[13] = Cidade
-            # cells[14] = Estado
-            
-            if len(cells) < 16:
-                print(f"⚠️ Linha ignorada: só tem {len(cells)} células (esperado >= 16)")
+            # HTML tem exatamente 10 colunas
+            if len(cells) < 10:
+                print(f"⚠️ Linha ignorada: só tem {len(cells)} células (esperado 10)")
                 continue
 
             try:
-                # ✅ EXTRAI E LIMPA CADA CAMPO
+                # ✅ EXTRAI E LIMPA CADA CAMPO (índices 0-9)
                 cod_cli_for = clean_json_value(cells[0].get_text(strip=True))
                 cliente = clean_json_value(cells[1].get_text(strip=True))
                 data = clean_json_value(cells[2].get_text(strip=True))
+                total_str = clean_json_value(cells[3].get_text(strip=True))
+                vendedor = clean_json_value(cells[4].get_text(strip=True))
                 ref_produto = clean_json_value(cells[5].get_text(strip=True))
-                grupo = clean_json_value(cells[7].get_text(strip=True))
-                total_str = clean_json_value(cells[9].get_text(strip=True))
-                vendedor = clean_json_value(cells[11].get_text(strip=True))
-                marca = clean_json_value(cells[12].get_text(strip=True))
-                cidade = clean_json_value(cells[13].get_text(strip=True))
-                estado = clean_json_value(cells[14].get_text(strip=True))
+                grupo = clean_json_value(cells[6].get_text(strip=True))
+                marca = clean_json_value(cells[7].get_text(strip=True))
+                cidade = clean_json_value(cells[8].get_text(strip=True))
+                estado = clean_json_value(cells[9].get_text(strip=True))
 
-                # Converte valor
+                # Converte valor (preserva sinal negativo se for devolução)
                 total = converter_valor_brasileiro(total_str)
 
                 # Validação básica
                 if not cliente or cliente == "":
-                    cliente = f"CLIENTE_{cod_cli_for}"
-                    print(f"⚠️ Cliente vazio, usando fallback: {cliente}")
+                    # Se cliente está vazio, pula este registro
+                    print(f"⚠️ Registro ignorado: Cliente vazio")
+                    continue
 
-                if not total or total == "0":
-                    print(f"⚠️ Registro ignorado: Total zerado ou inválido")
+                # Aceita valores negativos (devoluções) e positivos
+                if total == "0":
+                    print(f"⚠️ Registro ignorado: Total zerado")
                     continue
 
                 # ✅ MONTA OBJETO COM VALORES LIMPOS
@@ -229,13 +236,10 @@ async def processar_faturamento(request: Request):
                 
                 faturamento.append(item)
 
-                print(f"💰 {cliente[:35]}... | R$ {total} | {vendedor[:30]}")
+                print(f"✅ {cliente[:30]}... | R$ {total} | {vendedor[:25]}...")
 
             except Exception as e:
                 print(f"⚠️ Erro ao processar linha: {e}")
-                # Debug: mostra células
-                for i in range(min(len(cells), 16)):
-                    print(f"   cells[{i}] = {cells[i].get_text(strip=True)[:50]}")
                 continue
 
         print(f"📦 Total processado: {len(faturamento)} registros de faturamento")
@@ -243,13 +247,13 @@ async def processar_faturamento(request: Request):
         # ✅ VALIDA JSON ANTES DE RETORNAR
         try:
             # Tenta serializar para garantir que é JSON válido
-            json_test = json.dumps(faturamento)
+            json_test = json.dumps(faturamento, ensure_ascii=False)
             print(f"✅ JSON validado com sucesso - {len(json_test)} bytes")
         except Exception as e:
             print(f"❌ ERRO: JSON inválido gerado! {e}")
             return []
         
-        # ✅ RETORNA ARRAY DIRETO (sem wrapper "data")
+        # ✅ RETORNA ARRAY DIRETO
         return faturamento
 
     except Exception as e:
@@ -262,4 +266,4 @@ async def processar_faturamento(request: Request):
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "service": "processar-faturamento"}
+    return {"status": "healthy", "service": "processar-faturamento", "version": "6.0-FIXED"}
